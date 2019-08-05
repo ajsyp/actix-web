@@ -492,12 +492,8 @@ impl Stream for ClientReader {
                         let close_reason = Frame::parse_close_payload(&payload);
                         Ok(Async::Ready(Some(Message::Close(close_reason))))
                     }
-                    OpCode::Ping => Ok(Async::Ready(Some(Message::Ping(
-                        String::from_utf8_lossy(payload.as_ref()).into(),
-                    )))),
-                    OpCode::Pong => Ok(Async::Ready(Some(Message::Pong(
-                        String::from_utf8_lossy(payload.as_ref()).into(),
-                    )))),
+                    OpCode::Ping => Ok(Async::Ready(Some(Message::Ping(payload)))),
+                    OpCode::Pong => Ok(Async::Ready(Some(Message::Pong(payload)))),
                     OpCode::Binary => Ok(Async::Ready(Some(Message::Binary(payload)))),
                     OpCode::Text => {
                         let tmp = Vec::from(payload.as_ref());
@@ -552,14 +548,14 @@ impl ClientWriter {
 
     /// Send ping frame
     #[inline]
-    pub fn ping(&mut self, message: &str) {
-        self.write(Frame::message(Vec::from(message), OpCode::Ping, true, true));
+    pub fn ping<B: Into<Binary>>(&mut self, message: B) {
+        self.write(Frame::message(message, OpCode::Ping, true, true));
     }
 
     /// Send pong frame
     #[inline]
-    pub fn pong(&mut self, message: &str) {
-        self.write(Frame::message(Vec::from(message), OpCode::Pong, true, true));
+    pub fn pong<B: Into<Binary>>(&mut self, message: B) {
+        self.write(Frame::message(message, OpCode::Pong, true, true));
     }
 
     /// Send close frame
@@ -584,13 +580,13 @@ impl WsWriter for ClientWriter {
 
     /// Send ping frame
     #[inline]
-    fn send_ping(&mut self, message: &str) {
+    fn send_ping<B: Into<Binary>>(&mut self, message: B) {
         self.ping(message)
     }
 
     /// Send pong frame
     #[inline]
-    fn send_pong(&mut self, message: &str) {
+    fn send_pong<B: Into<Binary>>(&mut self, message: B) {
         self.pong(message)
     }
 

@@ -183,9 +183,9 @@ where
 
     /// Send ping frame
     #[inline]
-    pub fn ping(&mut self, message: &str) {
+    pub fn ping<B: Into<Binary>>(&mut self, message: B) {
         self.write_raw(Frame::message(
-            Vec::from(message),
+            message,
             OpCode::Ping,
             true,
             false,
@@ -194,9 +194,9 @@ where
 
     /// Send pong frame
     #[inline]
-    pub fn pong(&mut self, message: &str) {
+    pub fn pong<B: Into<Binary>>(&mut self, message: B) {
         self.write_raw(Frame::message(
-            Vec::from(message),
+            message,
             OpCode::Pong,
             true,
             false,
@@ -259,13 +259,13 @@ where
 
     /// Send ping frame
     #[inline]
-    fn send_ping(&mut self, message: &str) {
+    fn send_ping<B: Into<Binary>>(&mut self, message: B) {
         self.ping(message)
     }
 
     /// Send pong frame
     #[inline]
-    fn send_pong(&mut self, message: &str) {
+    fn send_pong<B: Into<Binary>>(&mut self, message: B) {
         self.pong(message)
     }
 

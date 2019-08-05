@@ -164,9 +164,9 @@ pub enum Message {
     /// Binary message
     Binary(Binary),
     /// Ping message
-    Ping(String),
+    Ping(Binary),
     /// Pong message
-    Pong(String),
+    Pong(Binary),
     /// Close message with optional reason
     Close(Option<CloseReason>),
 }
@@ -313,12 +313,8 @@ where
                         let close_reason = Frame::parse_close_payload(&payload);
                         Ok(Async::Ready(Some(Message::Close(close_reason))))
                     }
-                    OpCode::Ping => Ok(Async::Ready(Some(Message::Ping(
-                        String::from_utf8_lossy(payload.as_ref()).into(),
-                    )))),
-                    OpCode::Pong => Ok(Async::Ready(Some(Message::Pong(
-                        String::from_utf8_lossy(payload.as_ref()).into(),
-                    )))),
+                    OpCode::Ping => Ok(Async::Ready(Some(Message::Ping(payload)))),
+                    OpCode::Pong => Ok(Async::Ready(Some(Message::Pong(payload)))),
                     OpCode::Binary => Ok(Async::Ready(Some(Message::Binary(payload)))),
                     OpCode::Text => {
                         let tmp = Vec::from(payload.as_ref());
@@ -349,9 +345,9 @@ pub trait WsWriter {
     /// Send a binary
     fn send_binary<B: Into<Binary>>(&mut self, data: B);
     /// Send a ping message
-    fn send_ping(&mut self, message: &str);
+    fn send_ping<B: Into<Binary>>(&mut self, message: B);
     /// Send a pong message
-    fn send_pong(&mut self, message: &str);
+    fn send_pong<B: Into<Binary>>(&mut self, message: B);
     /// Close the connection
     fn send_close(&mut self, reason: Option<CloseReason>);
 }
