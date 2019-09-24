@@ -298,7 +298,6 @@ struct Inner {
     rx: PayloadBuffer<Box<Pipeline>>,
     closed: bool,
     continuation: Option<Continuation>,
-    max_continuation_size: usize,
 }
 
 /// Future that implementes client websocket handshake process.
@@ -459,7 +458,6 @@ impl Future for ClientHandshake {
             rx: PayloadBuffer::new(resp.payload()),
             closed: false,
             continuation: None,
-            max_continuation_size: self.max_continuation_size,
         };
 
         let inner = Rc::new(RefCell::new(inner));
@@ -467,6 +465,7 @@ impl Future for ClientHandshake {
             ClientReader {
                 inner: Rc::clone(&inner),
                 max_size: self.max_size,
+                max_continuation_size: self.max_continuation_size,
                 no_masking: self.no_masking,
             },
             ClientWriter {
@@ -481,6 +480,7 @@ impl Future for ClientHandshake {
 pub struct ClientReader {
     inner: Rc<RefCell<Inner>>,
     max_size: usize,
+    max_continuation_size: usize,
     no_masking: bool,
 }
 
@@ -496,6 +496,7 @@ impl Stream for ClientReader {
 
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
         let max_size = self.max_size;
+        let max_continuation_size = self.max_continuation_size;
         let no_masking = self.no_masking;
         let mut inner = self.inner.borrow_mut();
         if inner.closed {
@@ -512,7 +513,7 @@ impl Stream for ClientReader {
                         if !finished {
                             let inner = &mut *inner;
                             match inner.continuation {
-                                Some(ref mut continuation) if continuation.buffer.len() <= inner.max_continuation_size => {
+                                Some(ref mut continuation) if continuation.buffer.len() <= max_continuation_size => {
                                     continuation
                                         .buffer
                                         .append(&mut Vec::from(payload.as_ref()));
