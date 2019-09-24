@@ -31,7 +31,7 @@ impl Actor for Ws {
 impl StreamHandler<ws::Message, ws::ProtocolError> for Ws {
     fn handle(&mut self, msg: ws::Message, ctx: &mut Self::Context) {
         match msg {
-            ws::Message::Ping(msg) => ctx.pong(&msg),
+            ws::Message::Ping(msg) => ctx.pong(msg),
             ws::Message::Text(text) => ctx.text(text),
             ws::Message::Binary(bin) => ctx.binary(bin),
             ws::Message::Close(reason) => ctx.close(reason),
@@ -58,7 +58,7 @@ fn test_simple() {
 
     writer.ping("ping");
     let (item, reader) = srv.execute(reader.into_future()).unwrap();
-    assert_eq!(item, Some(ws::Message::Pong("ping".to_owned())));
+    assert_eq!(item, Some(ws::Message::Pong(Binary::Bytes("ping".into()))));
 
     writer.close(Some(ws::CloseCode::Normal.into()));
     let (item, _) = srv.execute(reader.into_future()).unwrap();
@@ -97,7 +97,7 @@ fn test_simple_path() {
 
     writer.ping("ping");
     let (item, reader) = srv.execute(reader.into_future()).unwrap();
-    assert_eq!(item, Some(ws::Message::Pong("ping".to_owned())));
+    assert_eq!(item, Some(ws::Message::Pong(Binary::Bytes("ping".into()))));
 
     writer.close(Some(ws::CloseCode::Normal.into()));
     let (item, _) = srv.execute(reader.into_future()).unwrap();
@@ -224,7 +224,7 @@ impl Ws2 {
 impl StreamHandler<ws::Message, ws::ProtocolError> for Ws2 {
     fn handle(&mut self, msg: ws::Message, ctx: &mut Self::Context) {
         match msg {
-            ws::Message::Ping(msg) => ctx.pong(&msg),
+            ws::Message::Ping(msg) => ctx.pong(msg),
             ws::Message::Text(text) => ctx.text(text),
             ws::Message::Binary(bin) => ctx.binary(bin),
             ws::Message::Close(reason) => ctx.close(reason),
