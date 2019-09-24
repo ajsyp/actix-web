@@ -89,9 +89,9 @@ pub enum ProtocolError {
     /// A payload reached size limit.
     #[fail(display = "A payload reached size limit.")]
     Overflow,
-    /// Continuation is not supported
-    #[fail(display = "Continuation is not supported.")]
-    NoContinuation,
+    /// Bad continuation frame sequence or overflow of continuation buffer.
+    #[fail(display = "Bad continuation frame sequence or overflow of continuation buffer.")]
+    BadContinuation,
     /// Bad utf-8 encoding
     #[fail(display = "Bad utf-8 encoding.")]
     BadEncoding,
@@ -251,11 +251,23 @@ pub fn handshake<S>(
         .take())
 }
 
+enum ContinuationOpCode {
+    Binary,
+    Text
+}
+
+struct Continuation {
+    opcode: ContinuationOpCode,
+    buffer: Vec<u8>,
+}
+
 /// Maps `Payload` stream into stream of `ws::Message` items
 pub struct WsStream<S> {
     rx: PayloadBuffer<S>,
     closed: bool,
     max_size: usize,
+    continuation: Option<Continuation>,
+    max_continuation_size: usize,
 }
 
 impl<S> WsStream<S>
@@ -268,6 +280,8 @@ where
             rx: PayloadBuffer::new(stream),
             closed: false,
             max_size: 65_536,
+            continuation: None,
+            max_continuation_size: 1_048_576,
         }
     }
 
@@ -278,7 +292,17 @@ where
         self.max_size = size;
         self
     }
+
+    /// Set max continuation size
+    ///
+    /// By default max continuation size is set to 1Mb
+    pub fn max_continuation_size(mut self, size: usize) -> Self {
+        self.max_continuation_size = size;
+        self
+    }
 }
+
+
 
 impl<S> Stream for WsStream<S>
 where
@@ -296,14 +320,44 @@ where
             Ok(Async::Ready(Some(frame))) => {
                 let (finished, opcode, payload) = frame.unpack();
 
-                // continuation is not supported
-                if !finished {
-                    self.closed = true;
-                    return Err(ProtocolError::NoContinuation);
-                }
-
                 match opcode {
-                    OpCode::Continue => Err(ProtocolError::NoContinuation),
+                    OpCode::Continue => {
+                        if !finished {
+                            match self.continuation {
+                                Some(ref mut continuation) if continuation.buffer.len() <= self.max_continuation_size => {
+                                    continuation.buffer.append(&mut Vec::from(payload.as_ref()));
+                                    Ok(Async::NotReady)
+                                }
+                                _ => {
+                                    self.closed = true;
+                                    Err(ProtocolError::BadContinuation)
+                                }
+                            }
+                        } else {
+                            match self.continuation.take() {
+                                Some(Continuation {opcode, mut buffer}) => {
+                                    buffer.append(&mut Vec::from(payload.as_ref()));
+                                    match opcode {
+                                        ContinuationOpCode::Binary =>
+                                            Ok(Async::Ready(Some(Message::Binary(Binary::from(buffer))))),
+                                        ContinuationOpCode::Text => {
+                                            match String::from_utf8(buffer) {
+                                                Ok(s) => Ok(Async::Ready(Some(Message::Text(s)))),
+                                                Err(_) => {
+                                                    self.closed = true;
+                                                    Err(ProtocolError::BadEncoding)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                None => {
+                                    self.closed = true;
+                                    Err(ProtocolError::BadContinuation)
+                                }
+                            }
+                        }
+                    }
                     OpCode::Bad => {
                         self.closed = true;
                         Err(ProtocolError::BadOpCode)
@@ -315,15 +369,33 @@ where
                     }
                     OpCode::Ping => Ok(Async::Ready(Some(Message::Ping(payload)))),
                     OpCode::Pong => Ok(Async::Ready(Some(Message::Pong(payload)))),
-                    OpCode::Binary => Ok(Async::Ready(Some(Message::Binary(payload)))),
+                    OpCode::Binary => {
+                        if finished {
+                            Ok(Async::Ready(Some(Message::Binary(payload))))
+                        } else {
+                            self.continuation = Some(Continuation {
+                                opcode: ContinuationOpCode::Binary,
+                                buffer: Vec::from(payload.as_ref())
+                            });
+                            Ok(Async::NotReady)
+                        }
+                    }
                     OpCode::Text => {
-                        let tmp = Vec::from(payload.as_ref());
-                        match String::from_utf8(tmp) {
-                            Ok(s) => Ok(Async::Ready(Some(Message::Text(s)))),
-                            Err(_) => {
-                                self.closed = true;
-                                Err(ProtocolError::BadEncoding)
+                        if finished {
+                            let tmp = Vec::from(payload.as_ref());
+                            match String::from_utf8(tmp) {
+                                Ok(s) => Ok(Async::Ready(Some(Message::Text(s)))),
+                                Err(_) => {
+                                    self.closed = true;
+                                    Err(ProtocolError::BadEncoding)
+                                }
                             }
+                        } else {
+                            self.continuation = Some(Continuation {
+                                opcode: ContinuationOpCode::Text,
+                                buffer: Vec::from(payload.as_ref())
+                            });
+                            Ok(Async::NotReady)
                         }
                     }
                 }

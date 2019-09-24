@@ -127,6 +127,7 @@ pub struct Client {
     protocols: Option<String>,
     conn: Addr<ClientConnector>,
     max_size: usize,
+    max_continuation_size: usize,
     no_masking: bool,
 }
 
@@ -145,6 +146,7 @@ impl Client {
             origin: None,
             protocols: None,
             max_size: 65_536,
+            max_continuation_size: 1_048_576,
             no_masking: false,
             conn,
         };
@@ -189,6 +191,14 @@ impl Client {
     /// By default max size is set to 64kb
     pub fn max_frame_size(mut self, size: usize) -> Self {
         self.max_size = size;
+        self
+    }
+
+    /// Set max continuation size
+    ///
+    /// By default max size is set to 1Mb
+    pub fn max_continuation_size(mut self, size: usize) -> Self {
+        self.max_continuation_size = size;
         self
     }
 
@@ -268,15 +278,27 @@ impl Client {
             }
 
             // start handshake
-            ClientHandshake::new(request, self.max_size, self.no_masking)
+            ClientHandshake::new(request, self.max_size, self.max_continuation_size, self.no_masking)
         }
     }
+}
+
+enum ContinuationOpCode {
+    Binary,
+    Text,
+}
+
+struct Continuation {
+    opcode: ContinuationOpCode,
+    buffer: Vec<u8>,
 }
 
 struct Inner {
     tx: UnboundedSender<Bytes>,
     rx: PayloadBuffer<Box<Pipeline>>,
     closed: bool,
+    continuation: Option<Continuation>,
+    max_continuation_size: usize,
 }
 
 /// Future that implementes client websocket handshake process.
@@ -289,12 +311,13 @@ pub struct ClientHandshake {
     key: String,
     error: Option<ClientError>,
     max_size: usize,
+    max_continuation_size: usize,
     no_masking: bool,
 }
 
 impl ClientHandshake {
     fn new(
-        mut request: ClientRequest, max_size: usize, no_masking: bool,
+        mut request: ClientRequest, max_size: usize, max_continuation_size: usize, no_masking: bool,
     ) -> ClientHandshake {
         // Generate a random key for the `Sec-WebSocket-Key` header.
         // a base64-encoded (see Section 4 of [RFC4648]) value that,
@@ -315,6 +338,7 @@ impl ClientHandshake {
         ClientHandshake {
             key,
             max_size,
+            max_continuation_size,
             no_masking,
             request: Some(request.send()),
             tx: Some(tx),
@@ -329,6 +353,7 @@ impl ClientHandshake {
             tx: None,
             error: Some(err),
             max_size: 0,
+            max_continuation_size: 0,
             no_masking: false,
         }
     }
@@ -433,6 +458,8 @@ impl Future for ClientHandshake {
             tx: self.tx.take().unwrap(),
             rx: PayloadBuffer::new(resp.payload()),
             closed: false,
+            continuation: None,
+            max_continuation_size: self.max_continuation_size,
         };
 
         let inner = Rc::new(RefCell::new(inner));
@@ -442,7 +469,10 @@ impl Future for ClientHandshake {
                 max_size: self.max_size,
                 no_masking: self.no_masking,
             },
-            ClientWriter { inner },
+            ClientWriter {
+                inner,
+                continuation: ClientWriterContinuation::Inactive,
+            },
         )))
     }
 }
@@ -475,13 +505,51 @@ impl Stream for ClientReader {
         // read
         match Frame::parse(&mut inner.rx, no_masking, max_size) {
             Ok(Async::Ready(Some(frame))) => {
-                let (_finished, opcode, payload) = frame.unpack();
+                let (finished, opcode, payload) = frame.unpack();
 
                 match opcode {
-                    // continuation is not supported
                     OpCode::Continue => {
-                        inner.closed = true;
-                        Err(ProtocolError::NoContinuation)
+                        if !finished {
+                            let inner = &mut *inner;
+                            match inner.continuation {
+                                Some(ref mut continuation) if continuation.buffer.len() <= inner.max_continuation_size => {
+                                    continuation
+                                        .buffer
+                                        .append(&mut Vec::from(payload.as_ref()));
+                                    Ok(Async::NotReady)
+                                }
+                                _ => {
+                                    inner.closed = true;
+                                    Err(ProtocolError::BadContinuation)
+                                }
+                            }
+                        } else {
+                            match inner.continuation.take() {
+                                Some(Continuation { opcode, mut buffer }) => {
+                                    buffer.append(&mut Vec::from(payload.as_ref()));
+                                    match opcode {
+                                        ContinuationOpCode::Binary => Ok(Async::Ready(
+                                            Some(Message::Binary(Binary::from(buffer))),
+                                        )),
+                                        ContinuationOpCode::Text => {
+                                            match String::from_utf8(buffer) {
+                                                Ok(s) => Ok(Async::Ready(Some(
+                                                    Message::Text(s),
+                                                ))),
+                                                Err(_) => {
+                                                    inner.closed = true;
+                                                    Err(ProtocolError::BadEncoding)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                None => {
+                                    inner.closed = true;
+                                    Err(ProtocolError::BadContinuation)
+                                }
+                            }
+                        }
                     }
                     OpCode::Bad => {
                         inner.closed = true;
@@ -494,15 +562,33 @@ impl Stream for ClientReader {
                     }
                     OpCode::Ping => Ok(Async::Ready(Some(Message::Ping(payload)))),
                     OpCode::Pong => Ok(Async::Ready(Some(Message::Pong(payload)))),
-                    OpCode::Binary => Ok(Async::Ready(Some(Message::Binary(payload)))),
+                    OpCode::Binary => {
+                        if finished {
+                            Ok(Async::Ready(Some(Message::Binary(payload))))
+                        } else {
+                            inner.continuation = Some(Continuation {
+                                opcode: ContinuationOpCode::Binary,
+                                buffer: Vec::from(payload.as_ref()),
+                            });
+                            Ok(Async::NotReady)
+                        }
+                    }
                     OpCode::Text => {
-                        let tmp = Vec::from(payload.as_ref());
-                        match String::from_utf8(tmp) {
-                            Ok(s) => Ok(Async::Ready(Some(Message::Text(s)))),
-                            Err(_) => {
-                                inner.closed = true;
-                                Err(ProtocolError::BadEncoding)
+                        if finished {
+                            let tmp = Vec::from(payload.as_ref());
+                            match String::from_utf8(tmp) {
+                                Ok(s) => Ok(Async::Ready(Some(Message::Text(s)))),
+                                Err(_) => {
+                                    inner.closed = true;
+                                    Err(ProtocolError::BadEncoding)
+                                }
                             }
+                        } else {
+                            inner.continuation = Some(Continuation {
+                                opcode: ContinuationOpCode::Text,
+                                buffer: Vec::from(payload.as_ref()),
+                            });
+                            Ok(Async::NotReady)
                         }
                     }
                 }
@@ -517,9 +603,17 @@ impl Stream for ClientReader {
     }
 }
 
+#[derive(PartialEq)]
+enum ClientWriterContinuation {
+    Inactive,
+    Text,
+    Binary,
+}
+
 /// Websocket writer client
 pub struct ClientWriter {
     inner: Rc<RefCell<Inner>>,
+    continuation: ClientWriterContinuation,
 }
 
 impl ClientWriter {
@@ -537,13 +631,66 @@ impl ClientWriter {
     /// Send text frame
     #[inline]
     pub fn text<T: Into<Binary>>(&mut self, text: T) {
+        assert!(
+            self.continuation == ClientWriterContinuation::Inactive,
+            "Cannot send text frame while continuation is active."
+        );
         self.write(Frame::message(text.into(), OpCode::Text, true, true));
+    }
+
+    /// Send a part of a text frame.
+    /// The receiver will concatenate all parts when receiving the final
+    /// frame with `finished == true`.
+    #[inline]
+    pub fn text_part<T: Into<Binary>>(&mut self, text: T, finished: bool) {
+        match self.continuation {
+            ClientWriterContinuation::Inactive => {
+                self.write(Frame::message(text.into(), OpCode::Text, finished, true))
+            }
+            ClientWriterContinuation::Text => self.write(Frame::message(
+                text.into(),
+                OpCode::Continue,
+                finished,
+                true,
+            )),
+            _ => panic!("Cannot send text part while binary continuation is active."),
+        };
+        self.continuation = if !finished {
+            ClientWriterContinuation::Text
+        } else {
+            ClientWriterContinuation::Inactive
+        };
     }
 
     /// Send binary frame
     #[inline]
     pub fn binary<B: Into<Binary>>(&mut self, data: B) {
+        assert!(
+            self.continuation == ClientWriterContinuation::Inactive,
+            "Cannot send binary frame while continuation is active."
+        );
         self.write(Frame::message(data, OpCode::Binary, true, true));
+    }
+
+    /// Send a part of a binary frame.
+    /// The receiver will concatenate all parts when receiving the final
+    /// frame with `finished == true`.
+    #[inline]
+    pub fn binary_part<B: Into<Binary>>(&mut self, data: B, finished: bool) {
+        match self.continuation {
+            ClientWriterContinuation::Inactive => {
+                self.write(Frame::message(data, OpCode::Binary, finished, true))
+            }
+            ClientWriterContinuation::Binary => {
+                self.write(Frame::message(data, OpCode::Continue, finished, true))
+            }
+            _ => panic!("Cannot send binary part while text continuation is active."),
+        };
+        self.continuation = if !finished {
+            ClientWriterContinuation::Binary
+        } else {
+            ClientWriterContinuation::Inactive
+        };
     }
 
     /// Send ping frame
