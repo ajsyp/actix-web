@@ -38,11 +38,20 @@ pub enum SendRequestError {
     /// Error reading response payload
     #[fail(display = "Error reading response payload: {}", _0)]
     Io(#[cause] io::Error),
+    /// An Actix error was encounted.
+    #[fail(display = "Other error while reading/writing payload: {}", _0)]
+    Other(#[cause] Error),
 }
 
 impl From<io::Error> for SendRequestError {
     fn from(err: io::Error) -> SendRequestError {
         SendRequestError::Io(err)
+    }
+}
+
+impl From<Error> for SendRequestError {
+    fn from(err: Error) -> SendRequestError {
+        SendRequestError::Other(err)
     }
 }
 
@@ -212,9 +221,7 @@ impl Future for SendRequest {
                 }
                 State::Send(mut pl) => {
                     pl.poll_timeout()?;
-                    pl.poll_write().map_err(|e| {
-                        io::Error::new(io::ErrorKind::Other, format!("{}", e).as_str())
-                    })?;
+                    pl.poll_write()?;
 
                     match pl.parse() {
                         Ok(Async::Ready(mut resp)) => {
