@@ -560,9 +560,6 @@ impl<S: 'static, H> ProcessResponse<S, H> {
                                         err
                                     );
                                 }
-                                if log_enabled!(Debug) {
-                                    debug!("{:?}", err);
-                                }
                             }
 
                             // always poll stream or actor for the first time
